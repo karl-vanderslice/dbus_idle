@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name              = "dbus_idle"
-version           = "2024.7.0"
+version           = "2024.7.1"
 description       = "System idle time using DBus"
 readme            = "README.md"
 keywords          = ["lnxlink"]
@@ -19,7 +19,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "dasbus>=1.7"
+    "dasbus>=1.7",
+    "PyGObject>=3.44.0"
 ]
 
 
