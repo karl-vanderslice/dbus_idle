@@ -62,20 +62,21 @@ class DBusIdleMonitor(IdleMonitor):
     """
 
     def __init__(self, **kwargs) -> None:
-        import dbus
+        from dasbus.connection import SessionMessageBus
         super().__init__(**kwargs)
 
-        session_bus = dbus.SessionBus()
-        for service in session_bus.list_names():
+        session_bus = SessionMessageBus()
+        for service in session_bus.proxy.ListNames():
             if 'IdleMonitor' in service:
                 service_path = f"/{service.replace('.', '/')}/Core"
-                self.connection = session_bus.get_object(service, service_path)
+                self.connection = session_bus.get_proxy(service, service_path)
                 self.service = service
+                break
         if not hasattr(self, 'connection'):
             raise AttributeError()
 
     def get_dbus_idle(self) -> float:
-        dbus_idle = self.connection.GetIdletime(dbus_interface=self.service)
+        dbus_idle = self.connection.GetIdletime()
         return int(dbus_idle)
 
 
