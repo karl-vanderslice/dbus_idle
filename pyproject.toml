@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "dasbus>=1.7",
-    "PyGObject>=3.44.0"
+    "PyGObject>=3.44.0",
     "pywayland>=0.4.18"
 ]
 
