@@ -7,7 +7,8 @@ from typing import Any, List, Type
 
 from pywayland.client import Display
 from pywayland.protocol.wayland import WlSeat, WlRegistry
-from kde_idle_protocol import OrgKdeKwinIdle
+from .protocols.idle import OrgKdeKwinIdle
+from .wayland_monitors import ExtIdleMonitor
 
 logger = logging.getLogger("dbus_idle")
 logging.basicConfig(level=logging.ERROR)
