@@ -13,6 +13,9 @@ pkgs.mkShell {
     python3Packages.pip
     python3Packages.wheel
     python3Packages.setuptools
+    python3Packages.dasbus
+    xprintidle
+    swayidle
   ];
 
   shellHook = ''
