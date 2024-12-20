@@ -96,6 +96,27 @@ class DBusIdleMonitor(IdleMonitor):
         return int(idle_service.GetIdletime()) / 1000
 
 
+class KDEPlasmaIdleMonitor(IdleMonitor):
+    def get_idle_time(self) -> int:
+        try:
+            result = subprocess.run(
+                [
+                    "qdbus",
+                    "org.freedesktop.ScreenSaver",
+                    "/ScreenSaver",
+                    "org.freedesktop.ScreenSaver.GetActiveTime",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            idle_time = int(result.stdout.strip())
+            return idle_time
+        except Exception as e:
+            logger.error("KDE/Plasma error: %s", e)
+            return -1
+
+
 class XprintidleIdleMonitor(IdleMonitor):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
