@@ -185,7 +185,6 @@ class WindowsIdleMonitor(IdleMonitor):
 class KDEPlasmaIdleMonitor(IdleMonitor):
     def get_idle_time(self) -> int:
         try:
-            # Plasma 6 update: Adjust DBus method to the correct one for Plasma 6
             result = subprocess.run(
                 [
                     "qdbus",
