@@ -1,9 +1,8 @@
+import ctypes
+import ctypes.util
 import logging
 import subprocess
-from typing import List, Type
-
-from pywayland.client import Display
-from pywayland.protocol.wayland import WlDisplay
+from typing import Any, List, Type
 
 logger = logging.getLogger("dbus_idle")
 logging.basicConfig(level=logging.ERROR)
@@ -22,83 +21,171 @@ class IdleMonitor:
         self.subclasses.append(self)
 
     @classmethod
-    def get_monitor(cls, backend: str = "dbus", **kwargs) -> "IdleMonitor":
-        for monitor_class in cls.subclasses:
-            if backend.lower() in monitor_class.__name__.lower():
-                try:
-                    return monitor_class(**kwargs)
-                except Exception:
-                    logger.warning("Could not load %s", monitor_class, exc_info=True)
-        raise RuntimeError(f"Could not find a working monitor for backend: {backend}")
+    def get_monitor(self, **kwargs) -> "IdleMonitor":
+        """
+        Return the first available idle monitor.
+        """
+        for monitor_class in self.subclasses:
+            try:
+                return monitor_class(**kwargs)
+            except Exception:
+                logger.warning("Could not load %s", monitor_class, exc_info=True)
+        raise RuntimeError("Could not find a working monitor.")
 
-    def get_idle_time(self) -> float:
-        raise NotImplementedError()
+    def get_dbus_idle(self) -> float:
+        """
+        Return idle time in milliseconds.
+        """
+        for monitor_class in self.subclasses:
+            try:
+                idle_time = monitor_class().get_dbus_idle()
+                logger.debug("Using: %s", monitor_class.__name__)
+                return idle_time
+            except Exception:
+                logger.warning(
+                    "Could not load %s", monitor_class.__name__, exc_info=False
+                )
+        return None
 
     def is_idle(self) -> bool:
-        return self.get_idle_time() > self.idle_threshold
-
-
-class WaylandIdleMonitor(IdleMonitor):
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.display = Display.connect()
-        self.registry = self.display.get_registry()
-        self.display.dispatch()
-        self.display.roundtrip()
-
-        # Placeholder: Wayland-specific idle protocol setup
-        self.idle_manager = None  # Add Wayland idle manager setup
-        if not self.idle_manager:
-            raise RuntimeError("Wayland idle protocol not available")
-
-    def get_idle_time(self) -> float:
-        # Placeholder: Query Wayland compositor for idle time
-        return 0.0
-
-
-class SwayIdleMonitor(IdleMonitor):
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        command = subprocess.run(
-            ["which", "swayidle"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        if command.returncode != 0:
-            raise RuntimeError("swayidle not available on this system")
-
-    def get_idle_time(self) -> float:
-        try:
-            output = subprocess.check_output(
-                ["swayidle", "--idle", "1"], stderr=subprocess.PIPE
-            ).decode()
-            idle_time = float(output.strip())
-            return idle_time
-        except Exception as e:
-            logger.error("Failed to get idle time from swayidle: %s", str(e))
-            return 0.0
+        """
+        Return whether the user is idling.
+        """
+        return self.get_dbus_idle() > self.idle_threshold
 
 
 class DBusIdleMonitor(IdleMonitor):
-    def get_idle_time(self) -> float:
+    """
+    Idle monitor for gnome running on wayland.
+
+    Based on
+      * https://unix.stackexchange.com/a/492328
+    """
+
+    def __init__(self, **kwargs) -> None:
         from dasbus.connection import SessionMessageBus
 
+        super().__init__(**kwargs)
+
         session_bus = SessionMessageBus()
-        idle_service = None
         for service in session_bus.proxy.ListNames():
             if "IdleMonitor" in service:
                 service_path = f"/{service.replace('.', '/')}/Core"
-                connection = session_bus.get_proxy(service, service_path)
-                idle_service = connection
+                self.connection = session_bus.get_proxy(service, service_path)
+                self.service = service
                 break
+        if not hasattr(self, "connection"):
+            raise AttributeError()
 
-        if not idle_service:
-            raise RuntimeError("D-Bus IdleMonitor service not available")
+    def get_dbus_idle(self) -> float:
+        dbus_idle = self.connection.GetIdletime()
+        return int(dbus_idle)
 
-        return int(idle_service.GetIdletime()) / 1000
+
+class XprintidleIdleMonitor(IdleMonitor):
+    """Idle monitor using xprintidle command."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        command = subprocess.run(
+            ["which", "xprintidle"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        if command.returncode != 0:
+            raise AttributeError()
+
+    def get_dbus_idle(self) -> float:
+        stdout = subprocess.run(
+            "xprintidle", stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        ).stdout.decode("UTF-8")
+
+        idle_sec = int(stdout.strip())
+
+        return idle_sec
+
+
+class X11IdleMonitor(IdleMonitor):
+    """
+    Idle monitor for systems running X11.
+
+    Based on
+      * http://tperl.blogspot.com/2007/09/x11-idle-time-and-focused-window-in.html
+      * https://stackoverflow.com/a/55966565/7774036
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+        class XScreenSaverInfo(ctypes.Structure):
+            _fields_ = [
+                ("window", ctypes.c_ulong),  # screen saver window
+                ("state", ctypes.c_int),  # off, on, disabled
+                ("kind", ctypes.c_int),  # blanked, internal, external
+                ("since", ctypes.c_ulong),  # milliseconds
+                ("idle", ctypes.c_ulong),  # milliseconds
+                ("event_mask", ctypes.c_ulong),
+            ]  # events
+
+        lib_x11 = self._load_lib("X11")
+        # specify required types
+        lib_x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        lib_x11.XOpenDisplay.restype = ctypes.c_void_p
+        lib_x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        lib_x11.XDefaultRootWindow.restype = ctypes.c_uint32
+        # fetch current settings
+        self.display = lib_x11.XOpenDisplay(None)
+        if self.display is None:
+            raise AttributeError()
+        self.root_window = lib_x11.XDefaultRootWindow(self.display)
+
+        self.lib_xss = self._load_lib("Xss")
+        # specify required types
+        self.lib_xss.XScreenSaverQueryInfo.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(XScreenSaverInfo),
+        ]
+        self.lib_xss.XScreenSaverQueryInfo.restype = ctypes.c_int
+        self.lib_xss.XScreenSaverAllocInfo.restype = ctypes.POINTER(XScreenSaverInfo)
+        # allocate memory for idle information
+        self.xss_info = self.lib_xss.XScreenSaverAllocInfo()
+
+    def get_dbus_idle(self) -> float:
+        self.lib_xss.XScreenSaverQueryInfo(
+            self.display, self.root_window, self.xss_info
+        )
+        return self.xss_info.contents.idle
+
+    def _load_lib(self, name: str) -> Any:
+        path = ctypes.util.find_library(name)
+        if path is None:
+            raise OSError(f"Could not find library `{name}`")
+        return ctypes.cdll.LoadLibrary(path)
+
+
+class WindowsIdleMonitor(IdleMonitor):
+    """
+    Idle monitor for Windows.
+
+    Based on
+      * https://stackoverflow.com/q/911856
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        import win32api
+
+        self.win32api = win32api
+
+    def get_dbus_idle(self) -> float:
+        current_tick = self.win32api.GetTickCount()
+        last_tick = self.win32api.GetLastInputInfo()
+        return current_tick - last_tick
 
 
 class KDEPlasmaIdleMonitor(IdleMonitor):
     def get_idle_time(self) -> int:
         try:
+            # Plasma 6 update: Adjust DBus method to the correct one for Plasma 6
             result = subprocess.run(
                 [
                     "qdbus",
@@ -115,51 +202,3 @@ class KDEPlasmaIdleMonitor(IdleMonitor):
         except Exception as e:
             logger.error("KDE/Plasma error: %s", e)
             return -1
-
-
-class XprintidleIdleMonitor(IdleMonitor):
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        command = subprocess.run(
-            ["which", "xprintidle"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        if command.returncode != 0:
-            raise RuntimeError("xprintidle not available on this system")
-
-    def get_idle_time(self) -> float:
-        try:
-            output = subprocess.check_output(
-                ["xprintidle"], stderr=subprocess.PIPE
-            ).decode()
-            idle_time = float(output.strip()) / 1000
-            return idle_time
-        except Exception as e:
-            logger.error("Failed to get idle time from xprintidle: %s", str(e))
-            return 0.0
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="dbus-idle", description="Get idle time from various backends"
-    )
-    parser.add_argument(
-        "--backend",
-        choices=["dbus", "wayland", "swayidle", "xprintidle"],
-        default="dbus",
-        help="Specify the backend to use for idle detection",
-    )
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    args = parser.parse_args()
-
-    try:
-        monitor = IdleMonitor.get_monitor(backend=args.backend, debug=args.debug)
-        idle_time = monitor.get_idle_time()
-        print(f"Idle time: {idle_time} seconds")
-    except Exception as e:
-        logger.error("Failed to get idle time: %s", str(e))
-
-
-if __name__ == "__main__":
-    main()
